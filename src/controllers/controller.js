@@ -1,217 +1,237 @@
 const User = require('../models/user.model');
-const Article = require('../models/article.model');
-let controller = {}
+const Join = require('../models/join.model');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
+const nodemailer = require('nodemailer');
 
-controller.verify= async (req,res,next)=>{
-  const token = req.headers.authorization.split(" ")[1];
-  if (!token) return res.status(401).send({ message: 'Unauthorized' });
-  try {
-    const decodedToken = await jwt.verify(token, process.env.JWT_SECRET);
-    req.decodedToken=decodedToken
-    next()
-  } catch (error) {
-    return res.send({message:'Unauthorized from verify'})
+
+// Create a nodemailer transporter for Outlook
+const transporter = nodemailer.createTransport({
+  host: 'smtp.office365.com', // Outlook SMTP server
+  port: 587, // Outlook SMTP port (587 or 465)
+  secure: false, // TLS requires secure connection set to false
+  auth: {
+    user: process.env.EMAIL_USERNAME, // Your Outlook email address
+    pass: process.env.EMAIL_PASSWORD // Your Outlook email password
+  },
+  tls: {
+    rejectUnauthorized: false // Ignore SSL certificate verification
   }
-}
+});
 
 
-controller.signUp = async (req, res) => {
+
+const controller = {};
+
+// Middleware to verify JWT token
+controller.verifyToken = async (req, res, next) => {
   try {
-    // Check if user already exists
-    const existingUser = await User.findOne({ email: req.body.email });
+    const token = req.headers.authorization;
+ 
+    if (!token) return res.status(401).send({ message: 'Unauthorized' });
 
-    // If user already signed up, don't allow them to make another account
-    if (existingUser) {
-      return res.send({ message: "already signed up", success: false });
+    const decodedToken = jwt.verify(token.split(" ")[1], process.env.JWT_SECRET);
+    req.decodedToken = decodedToken;
+    next();
+  } catch (error) {
+    console.error('Error verifying token:', error);
+    return res.status(401).send({ message: 'Unauthorized' });
+  }
+};
+
+// Middleware to verify admin privileges
+controller.verifyAdmin = async (req, res, next) => {
+  try {let token = req.headers.authorization; // Use 'authorization' instead of 'Authorization'
+  if (!token) return res.status(401).send({ message: 'Unauthorized no token' });
+  token=token.split(" ")[1]
+    const decodedToken = jwt.verify(token, process.env.JWT_SECRET);
+    req.decodedToken = decodedToken;
+    if (decodedToken.userId !== process.env.ADMIN_ID) {
+
+      return res.status(401).send({ message: 'Unauthorized admin' });
     }
 
-    // Hash the password with bcrypt
-    const hashedPassword = await bcrypt.hash(req.body.password, 10);
+    next();
+  } catch (error) {
+    console.error('Error verifying admin:', error);
+    return res.status(401).send({ message: 'Unauthorized error' });
+  }
+};
 
-    // Replace the plain text password with the hashed one
-    req.body.password = hashedPassword;
+// Function to generate a random join code
+function generateJoinCode(length) {
+  const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let code = '';
+  for (let i = 0; i < length; i++) {
+    code += characters.charAt(Math.floor(Math.random() * characters.length));
+  }
+  return code;
+}
 
-    // Create a new user and save
-    const newUser = new User(req.body);
+// Controller to send join code via email
+controller.sendJoinCodeByEmail = async (req, res) => {
+  const receiver = req.body.receiver;
+  const joinkey = generateJoinCode(6);
 
-    // Save the new user to the database
+  try {
+    const mailOptions = {
+      from: process.env.EMAIL_USERNAME,
+      to: receiver,
+      subject: 'Your Join Code',
+      text: `Your join code is: ${joinkey}`
+    };
+
+    await transporter.sendMail(mailOptions);
+    const newJoin = new Join({ key: joinkey });
+    await newJoin.save();
+
+    res.send({ message: 'Join code sent successfully' });
+  } catch (error) {
+    console.error('Error sending join code:', error);
+    res.status(500).send('An error occurred while sending the join code');
+  }
+};
+
+// Controller to handle user signup
+controller.signUp = async (req, res) => {
+  try {
+    const { join, email, password, firstName, lastName, dateNais, mobile } = req.body;
+
+    if (!join || !email || !password || !firstName || !lastName || !dateNais || !mobile) {
+      return res.status(400).send({ message: 'All fields are required' });
+    }
+
+    const joined = await Join.findOne({ key: join });
+    if (!joined) {
+      return res.status(400).send({ message: 'Invalid join code' });
+    }
+
+    // Remove the join document from the database
+    await Join.findOneAndDelete({ key: join });
+
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(409).send({ message: 'Email already exists' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const username = `${firstName.substring(0, 2)}${lastName.substring(0, 2)}${dateNais.substring(0, 2)}`;
+
+    const newUser = new User({ email, password: hashedPassword, username, firstName, lastName, dateNais, mobile });
     const savedUser = await newUser.save();
 
-    // Generate JWT token for the user
-    const token = jwt.sign(
-      { userId: savedUser._id },
-      process.env.JWT_SECRET,
-      { expiresIn: '1h' }
-    );
-
-    // Return success response with the saved user and token
-    return res.send({
-      success: true,
-      message: "Created new user",
-      data: {
-        user: savedUser,
-        token: token,
-      },
+    return res.status(201).send({
+      message: "User created successfully",
+      user: savedUser
     });
   } catch (error) {
-    console.error(error);
+    console.error('Error signing up:', error);
     return res.status(500).send("An error occurred while signing up.");
   }
 };
 
-controller.update = async (req, res) => {
-  try {
-    req.body.password=await bcrypt.hash(req.body.password, 10)
-    const  updatedUser= await User.findByIdAndUpdate(
-      req.decodedToken.userId,
-      req.body,
-      { new: true },
-    );
-    res.send({ updatedUser, message:"user updated with succes", success:true });
-  } catch (error) {
-    return res.send({
-      message: "An error occurred while updating user.",
-    });
-  }
-};
+// Controller to handle user login
 controller.login = async (req, res) => {
   try {
-    // Check if user exists
-    const existingUser = await User.findOne({ email: req.body.email });
+    const { username, password } = req.body;
 
-    // If user doesn't exist, return error response
+    const existingUser = await User.findOne({ username });
     if (!existingUser) {
-      return res.send({ message: "user not found", success: false });
-    }
-    // Compare the password with bcrypt
-    const isPasswordCorrect = await bcrypt.compare(req.body.password, existingUser.password);
-    // If password is incorrect, return error response
-    if (!isPasswordCorrect) {
-      return res.send({ message: 'invalid credentials', success: false });
+      return res.status(404).send({ message: "User not found" });
     }
 
-    // Generate JWT token for the user
+    const isPasswordCorrect = await bcrypt.compare(password, existingUser.password);
+    if (!isPasswordCorrect) {
+      return res.status(401).send({ message: 'Invalid credentials' });
+    }
+//create token to connect
     const token = jwt.sign(
-      { userId: existingUser._id},
+      { userId: existingUser._id },
       process.env.JWT_SECRET,
       { expiresIn: '1h' }
     );
 
-    // Return success response with the generated token
     return res.send({
-      success: true,
       message: "Logged in successfully",
-      data: {
-        user: existingUser,
-        token: token,
-      },
+      token,
+      isAdmin:existingUser._id==process.env.ADMIN_ID
     });
   } catch (error) {
-    console.error(error);
+    console.error('Error logging in:', error);
     return res.status(500).send("An error occurred while logging in.");
   }
 };
 
-controller.updateArticle = async (req, res) => {
+// Controller to update user information
 
+
+controller.updateUser = async (req, res) => {
   try {
-    // Find the article by id
-    const article = await Article.findById(req.params.id);
-
-    // Check if the article exists
-    if (!article) {
-      return res.status(404).send({ message: "Article not found" });
-    }
-    if (req.decodedToken.userId !== article.poster.toString()) {
-      return res.status(401).send({ message: "Unauthorized" });
+    const { password, firstName, lastName, mobile, dateNais, email, username } = req.body;
+    
+    // Check if password is provided and hash it
+    let hashedPassword;
+    if (password) {
+      hashedPassword = await bcrypt.hash(password, 10);
     }
 
-    // Check if the article belongs to the user in the JWT token
+    // Construct the updated user data object
+    const updatedUserData = {};
+    if (hashedPassword) updatedUserData.password = hashedPassword;
+    if (firstName) updatedUserData.firstName = firstName;
+    if (lastName) updatedUserData.lastName = lastName;
+    if (mobile) updatedUserData.mobile = mobile;
+    if (dateNais) updatedUserData.dateNais = dateNais;
+    if (email) updatedUserData.email = email;
+    if (username) updatedUserData.username = username;
 
-    // Update the article and return success response
-    const updatedArticle = await Article.findByIdAndUpdate(
-      req.params.id,
-      req.body,
+    // Update the user document in the database
+    const updatedUser = await User.findByIdAndUpdate(
+      req.decodedToken.userId,
+      updatedUserData,
       { new: true }
     );
-    res.json({ updatedArticle, message: 'Updated successfully' });
-  } catch (error) {
-    console.error(error);
-    return res.status(500).send("An error occurred while updating article.");
-  }
-};
 
-controller.createArticle = async (req, res) => {
-
-  try {
-
-    // Create a new article with author id from the JWT token
-    const newArticle = new Article({
-      ...req.body,
-      poster: req.decodedToken.userId
-    });
-
-    // Save the new article to the database
-    const savedArticle = await newArticle.save();
-
-    // Return success response with the saved article
-    res.json({
-      success: true,
-      message: "Created new article",
-      data: savedArticle
-    });
-  } catch (error) {
-    console.error(error);
-    return res.status(500).send("An error occurred while creating article.");
-  }
-};
-controller.showArticles = async (req, res) => {
-  try {
-    const allArticle = await Article.find();
-    res.json(allArticle);
-  } catch (error) {
-    res.status(500).send(error);
-  }
-};
-
-controller.myArticles = async (req, res) => {
-  try {
-    // Find all articles posted by the user
-    const allArticle = await Article.find({ poster: req.decodedToken.userId });
-    res.json(allArticle);
-  } catch (error) {
-    console.error(error);
-    return res.status(500).send("An error occurred while fetching articles.");
-  }
-};
-
-
-controller.deleteArticle = async (req, res) => {
-
-  try {
-
-    // Find the article by id
-    const article = await Article.findById(req.params.id);
-
-    // Check if the article exists
-    if (!article) {
-      return res.status(404).send({ message: "Article not found" });
+    // Check if user document was found and updated
+    if (!updatedUser) {
+      return res.status(404).send({ message: "User not found" });
     }
 
-    // Check if the article belongs to the user in the JWT token
-    if (req.decodedToken.userId !== article.poster.toString()) {
-      return res.status(401).send({ message: "Unauthorized" });
-    }
-
-    // Delete the article and return success response
-    await Article.findByIdAndDelete(req.params.id);
-    res.status(200).json({ message: 'Article deleted successfully!' });
+    // Send response with updated user data
+    res.send({ message: "User updated successfully", user: updatedUser });
   } catch (error) {
-    console.error(error);
-    return res.status(500).send("An error occurred while deleting article.");
+    console.error('Error updating user:', error);
+    return res.status(500).send("An error occurred while updating user.");
   }
 };
 
-module.exports = controller
+
+
+// Controller to retrieve all users
+controller.getAllUsers = async (req, res) => {
+  try {
+    const allUsers = await User.find();
+    allUsers.splice(0, 1);
+        res.json(allUsers);
+  } catch (error) {
+    console.error('Error getting all users:', error);
+    res.status(500).send("An error occurred while retrieving users.");
+  }
+};
+
+// Controller to delete a user
+controller.deleteUser = async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).send({ message: "User not found" });
+    }
+    await User.findByIdAndDelete(req.params.id);
+    res.status(200).json({ message: 'User deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting user:', error);
+    return res.status(500).send("An error occurred while deleting user.");
+  }
+};
+
+module.exports = controller;

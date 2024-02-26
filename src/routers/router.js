@@ -4,21 +4,17 @@ const User = require('../models/user.model');
 
 const routes = express.Router(); // Create an instance of Express's Router
 
-
 // Define routes and associate them with the appropriate controller function
-routes.post('/signUp', controller.signUp); // Route to sign up a new user
 routes.post('/login', controller.login); // Route to log in an existing user
-routes.post('/user', controller.verify,async(req,res)=>{
-    
-    const {email,name,mobile}=await User.findById(req.decodedToken.userId)
-    res.send({email,name,mobile})
-}); // Route to log in an existing user
-routes.put('/users', controller.verify, controller.update); // Route to update an existing user (requires authentication)
+routes.post('/signUp', controller.signUp); // Route to sign up a new user
+routes.post('/user', controller.verifyToken, async (req, res) => {
+  const theUser= await User.findById(req.decodedToken.userId);
+  res.send(theUser);
+}); // Route to get user details
+routes.delete('/users/:id', controller.verifyAdmin, controller.deleteUser); // Route to delete a user
+routes.put('/users/:id', controller.verifyToken, controller.updateUser); // Route to update a user
+routes.post('/admin', controller.verifyAdmin, controller.getAllUsers);
+// Route to get all users by admin
+routes.post('/join', controller.sendJoinCodeByEmail); // Route to send join code via email
 
-/* Routes for managing articles */
-routes.get('/articles', controller.showArticles); // Route to show all articles (requires authentication)
-routes.post('/articles/new', controller.verify, controller.createArticle); // Route to create a new article (requires authentication)
-routes.put('/articles/:id', controller.verify, controller.updateArticle); // Route to update a specific article (requires authentication)
-routes.delete('/articles/:id', controller.verify, controller.deleteArticle); // Route to delete a specific article (requires authentication)
-routes.post('/users/myArticles', controller.verify, controller.myArticles); // Route to show all articles associated with a specific user (requires authentication)
 module.exports = routes; // Export the Router object so it can be used in other files
